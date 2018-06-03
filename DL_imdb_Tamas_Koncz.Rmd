@@ -1,0 +1,185 @@
+---
+title: "DL for text classification on the IMDB dataset"
+author: "Tamas Koncz"
+date: "June 3, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(keras)
+```
+
+Downloading the IMDB dataset below. As a first try, I'll pull the "default" 10,000 most frequent words only.
+```{r}
+vDimension = 10000 #this will allow us to rerun easily if we want to change the # of words
+imdb <- dataset_imdb(num_words = vDimension)
+```
+
+#### 1. Data preparation
+
+The imdb dataset is actually a nested list of training and test data. Below code helps us unpack this to a different set of variables, that we'll be able to use in our DL model.
+```{r}
+c(c(train_data, train_labels), c(test_data, test_labels)) %<-% imdb
+# train_data <- imdb$train$x
+# train_labels <- imdb$train$y
+# test_data <- imdb$test$x
+# test_labels <- imdb$test$y
+```
+
+The lists ending in "_data" will containg the reviews, while "_label"-s contain a 1/0 flag for positive/negative reviews.
+
+The imdb dataset comes already recoding words to integers, but it is possible to retrieve the original reviews.
+First, we need to use an additional dataset coming with keras, dataset_imdb_word_index:
+```{r}
+word_index <- dataset_imdb_word_index()
+reverse_word_index <- names(word_index)
+names(reverse_word_index) <- word_index
+
+reverse_word_index[1:10]
+```
+
+The below little function can be applied any member of the "_data" lists to translate the numbers back to words:
+```{r}
+decoded_review <- sapply(train_data[[10]], function(index) {
+  word <- if (index >= 3) reverse_word_index[[as.character(index - 3)]]
+  if (!is.null(word)) word else "?"
+})
+cat(decoded_review)
+```
+
+And it indeed is more friendly looking for humans than the coded version:
+```{r}
+train_data[[10]]
+```
+
+But for the DL, we'll stick with the numbers.
+
+Before we jump into to modeling, we still need to one-hot encode the dataset, so it's interpretable for the DL structure we are going to use:
+```{r}
+vectorize_sequences <- function(sequences, dimension = vDimension) {
+  results <- matrix(0, nrow = length(sequences), ncol = dimension)
+  for (i in 1:length(sequences))
+    results[i, sequences[[i]]] <- 1
+  results
+}
+
+x_train <- vectorize_sequences(train_data)
+x_test <- vectorize_sequences(test_data)
+```
+
+Last step before we can feed the data to an ANN is to ensure labels are in number format:
+```{r}
+y_train <- as.numeric(train_labels)
+y_test <- as.numeric(test_labels)
+```
+
+#### 2. Model structure
+
+Setting up the model below:
+```{r}
+model <- keras_model_sequential() %>%
+  layer_dense(units = 16, activation = "relu", input_shape = c(vDimension)) %>%
+  layer_dense(units = 16, activation = "relu") %>%
+  layer_dense(units = 1, activation = "sigmoid")
+```
+
+Let's review what kind of structure we've just set up. Our model will have 3 hidden layers, each of them dense.  
+Two two intermediary layers will have 16 units, while the third one will only have one, as this layer is to output the prediction for the sentiment.  
+Activation functions are relu-s for the first two layers, while the third one uses a sigmoid function, to map the output to the 0-1 probability range.  
+
+
+We also have to configure the optimizer. Given it's a binary classification problem, we are using cross entropy as the loss function to minimize.
+```{r}
+model %>% compile(
+  optimizer = "rmsprop",
+  loss = "binary_crossentropy",
+  metrics = c("accuracy")
+)
+```
+
+
+We'll traing the model with the use of a validation set from the training data, let's set that aside now:
+```{r}
+val_indices <- 1:10000
+
+x_val <- x_train[val_indices,]
+partial_x_train <- x_train[-val_indices,]
+y_val <- y_train[val_indices]
+partial_y_train <- y_train[-val_indices]
+```
+
+#### 3. Model training  
+  
+Training the model and saving it to the 'history' object. I'm going to do 20 iterations on the whole data set (epochs), and update the weights after each 512 samples (batch_size).
+```{r}
+history <- model %>% fit(
+  partial_x_train,
+  partial_y_train,
+  epochs = 20,
+  batch_size = 512,
+  validation_data = list(x_val, y_val)
+)
+```
+
+
+We can plot our results across the training epochs:
+```{r, fig.align = 'center'}
+plot(history)
+```
+
+If we want to see how a different setup would fare in this task, we have mainly 3 ways to do that:  
+1. Use a different model structure  
+2. Use a different optimizer  
+3. Use different fitting parameters (epocs, batch_size, etc.)
+
+We'll try out how we do if we keep the same model, but use different fitting options.
+```{r}
+model2 <- keras_model_sequential() %>%
+  layer_dense(units = 16, activation = "relu", input_shape = c(vDimension)) %>%
+  layer_dense(units = 16, activation = "relu") %>%
+  layer_dense(units = 1, activation = "sigmoid")
+
+model2 %>% compile(
+  optimizer = "rmsprop",
+  loss = "binary_crossentropy",
+  metrics = c("accuracy")
+)
+
+history2 <- model2 %>% fit(x_train, 
+                           y_train, 
+                           epochs = 4, 
+                           batch_size = 512,
+                           validation_data = list(x_val, y_val))
+```
+
+Let's plot again how our training went:
+```{r, fig.align = 'center'}
+plot(history2)
+```
+
+Our second run, with less epochs did somewhat better on the validation set.
+
+#### 4. Evaluation of results  
+
+Let's just look at the first 15 predictions for the test set data:
+```{r}
+model2 %>% 
+  predict(x_test[1:15,]) %>% 
+  cbind(y_test[1:15])
+```
+
+If we would use a 0.5 cutoff, most predictions would be right.  
+We can also see that the model has an alright level of confidence with it's predictions.
+
+As a last step let's just see our overall accuracy on the whole test set:
+```{r}
+results2 <- model2 %>% evaluate(x_test, y_test)
+results2$acc
+```
+
+It's ~88%, fairly good for a simple model. The book mentions that it could be pumped much higher if we took a deep dive into finding the right model - for me, an interesting thing I'll want to check in the future is how it fares against a tidytext approach using non-ANN models.
+  
